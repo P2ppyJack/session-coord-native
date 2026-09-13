@@ -1,0 +1,26 @@
+name: session-coord-native
+version: 0.1.0
+manifest_version: 1
+kind: standalone
+description: Admit exact session-coord wake events as native Hermes turns
+license: MIT
+platforms:
+  - linux
+  - macos
+python_dependencies: []
+tags:
+  - coordination
+  - continuation
+  - native-turn-source
+config_schema:
+  board_script:
+    type: str
+    default: ""
+    description: Optional absolute path to session_coord.py; empty uses the machine root scripts directory.
+  supported_surfaces:
+    type: list
+    default:
+      - cli
+      - tui
+      - gateway
+    description: Native Hermes surfaces on which coordination turns may be admitted.
