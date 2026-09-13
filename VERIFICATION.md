@@ -53,7 +53,8 @@ database unchanged. The repair passed an independent code re-review.
   build 26200 and AMD64 interpreter processes; it is not native ARM64 certification.
 - This rerun covers the entire standalone pytest suite and wake CLI selftests,
   not a repeat of the earlier full 33-step workflow. The tested board source is
-  `1d2396f1b1378592cb9a3d16488e902e7ba403d6`; later publication edits are documentation-only.
+  `1d2396f1b1378592cb9a3d16488e902e7ba403d6`; its production and test files remain
+  byte-identical. Publication notes and CI environment placement were updated separately.
   Verified payload SHA-256:
   `bce60ace50d3819b1247ab47d17bb70f53c832b42c7ef0da2247c3e040b45f86`.
 
