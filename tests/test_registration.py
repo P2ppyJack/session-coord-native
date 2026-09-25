@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 import sys
 import types
@@ -152,8 +153,12 @@ def test_manifest_names_standalone_plugin_and_declares_public_settings():
     manifest = yaml.safe_load((PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
 
     assert manifest["name"] == "session-coord-native"
+    assert manifest["version"] == "0.2.0"
+    assert manifest["manifest_version"] == 2
+    assert manifest["api_version"] == 1
     assert manifest["kind"] == "standalone"
     assert manifest["license"] == "MIT"
+    assert manifest["homepage"] == "https://github.com/P2ppyJack/session-coord-native"
     assert manifest["platforms"] == ["linux", "macos"]
     assert manifest["python_dependencies"] == []
     assert manifest["config_schema"] == {
@@ -219,7 +224,9 @@ def test_register_reads_only_plugin_settings_for_board_and_surfaces(
     assert [key for key, _ in ctx.lookups] == ["supported_surfaces", "board_script"]
 
 
-def test_register_reports_actionable_error_without_native_registrar(plugin_loader):
+def test_register_degrades_gracefully_without_native_registrar(
+    plugin_loader, caplog
+):
     class OldHostContext:
         profile_name = "default"
 
@@ -231,8 +238,25 @@ def test_register_reports_actionable_error_without_native_registrar(plugin_loade
 
     plugin = plugin_loader()
 
-    with pytest.raises(RuntimeError, match="register_native_turn_source"):
-        plugin.register(OldHostContext())
+    with caplog.at_level(logging.WARNING, logger=plugin.__name__):
+        assert plugin.register(OldHostContext()) is None
+
+    assert caplog.messages == [plugin._HOST_API_UNAVAILABLE]
+
+
+def test_register_degrades_gracefully_without_native_host_module(
+    plugin_loader, monkeypatch, caplog
+):
+    plugin = plugin_loader()
+    ctx = FrozenHostContext()
+    monkeypatch.setitem(sys.modules, "hermes_cli.native_turn_sources", None)
+
+    with caplog.at_level(logging.WARNING, logger=plugin.__name__):
+        assert plugin.register(ctx) is None
+
+    assert caplog.messages == [plugin._HOST_API_UNAVAILABLE]
+    assert ctx.native_calls == []
+    assert ctx.cli_calls == []
 
 
 def test_native_check_reports_invalid_public_policy_response(

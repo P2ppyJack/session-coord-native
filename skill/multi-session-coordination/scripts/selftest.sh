@@ -14,7 +14,7 @@ ck() { # ck <desc> <expected_rc> <actual_rc> [grep_str] [output]
 
 # --- 1. register two sessions
 A=$($PY "$SC" register --task "memory hygiene sweep" --surface desktop | head -1)
-OUT=$($PY "$SC" register --task "CMMC report tweak" --surface cli)
+OUT=$($PY "$SC" register --task "compliance report tweak" --surface cli)
 B=$(head -1 <<<"$OUT")
 ck "register B sees A as co-worker" 0 $? "memory hygiene sweep" "$OUT"
 
@@ -27,7 +27,7 @@ OUT=$($PY "$SC" check --id "$B" --res memory); RC=$?
 ck "B check memory -> 75 + holder task shown" 75 $RC "memory hygiene" "$OUT"
 
 # --- 4. dir-prefix conflict: child path blocked, sibling-with-prefix-name free
-OUT=$($PY "$SC" check --id "$B" --res "file:~/.hermes/skills/imessage/SKILL.md"); RC=$?
+OUT=$($PY "$SC" check --id "$B" --res "file:~/.hermes/skills/example/SKILL.md"); RC=$?
 ck "child of claimed dir -> held" 75 $RC "" "$OUT"
 OUT=$($PY "$SC" check --id "$B" --res "file:~/.hermes/skills-retired"); RC=$?
 ck "path-boundary: skills-retired NOT blocked by skills claim" 0 $RC "FREE" "$OUT"

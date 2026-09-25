@@ -1,9 +1,11 @@
 name: session-coord-native
-version: 0.1.0
-manifest_version: 1
+version: 0.2.0
+manifest_version: 2
+api_version: 1
 kind: standalone
 description: Admit exact session-coord wake events as native Hermes turns
 license: MIT
+homepage: https://github.com/P2ppyJack/session-coord-native
 platforms:
   - linux
   - macos

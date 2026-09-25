@@ -40,6 +40,12 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install compatible host test dependencies
         run: python -m pip install -e "${{ github.workspace }}/hermes[dev]"
+      - name: Validate plugin manifest and registration
+        working-directory: plugin
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-validation-home
+          PYTHONPATH: ${{ github.workspace }}/hermes
+        run: hermes plugins validate . --json
       - name: Verify optional plugin
         working-directory: plugin
         env:

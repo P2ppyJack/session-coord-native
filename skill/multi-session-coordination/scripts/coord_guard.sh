@@ -21,7 +21,7 @@
 #   waiters get the dead-holder warning.
 #
 # stdout hygiene: everything goes to stderr; nothing is printed to stdout —
-# safe for no_agent jobs where stdout is delivered verbatim as an iMessage.
+# safe for no_agent jobs where stdout is delivered verbatim to a chat channel.
 
 COORD_SC="${COORD_SC:-$HOME/.hermes/scripts/session_coord.py}"
 COORD_GUARD_ID=""

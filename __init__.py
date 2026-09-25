@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 if __package__:
@@ -14,6 +15,8 @@ else:  # pytest may import a hyphenated plugin root as bare ``__init__``
 PLUGIN_NAME = "session-coord-native"
 DEFAULT_SURFACES = ("cli", "tui", "gateway")
 _ALLOWED_SURFACES = frozenset(DEFAULT_SURFACES)
+_HOST_API_UNAVAILABLE = "This Hermes host does not provide the public native-turn-source API"
+logger = logging.getLogger(__name__)
 
 
 def _configured_surfaces(ctx) -> tuple[str, ...]:
@@ -53,18 +56,14 @@ def register(ctx):
     """Register the generic native source and the public ``session-coord`` CLI."""
     try:
         from hermes_cli.native_turn_sources import NativeTurnLease
-    except (ImportError, AttributeError) as exc:
-        raise RuntimeError(
-            "This Hermes host does not provide the public native-turn-source API; "
-            "update Hermes before enabling session-coord-native."
-        ) from exc
+    except (ImportError, AttributeError):
+        logger.warning(_HOST_API_UNAVAILABLE)
+        return None
 
     registrar = getattr(ctx, "register_native_turn_source", None)
     if not callable(registrar):
-        raise RuntimeError(
-            "This Hermes host lacks PluginContext.register_native_turn_source; "
-            "update Hermes before enabling session-coord-native."
-        )
+        logger.warning(_HOST_API_UNAVAILABLE)
+        return None
 
     surfaces = _configured_surfaces(ctx)
     source = SessionCoordNativeSource(

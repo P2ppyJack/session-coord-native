@@ -4,11 +4,21 @@
 
 ## Requirements
 
-- A Hermes release that exposes `PluginContext.register_native_turn_source(...)`, `NativeSessionView`, and `NativeTurnLease`.
+- A Hermes build that exposes `PluginContext.register_native_turn_source(...)`, `NativeSessionView`, and `NativeTurnLease`. For version 0.2.0, that public host API is proposed in [NousResearch/hermes-agent#110232](https://github.com/NousResearch/hermes-agent/pull/110232); it is not yet in a released Hermes version.
 - The framework-neutral `session_coord.py` and `coord_resume_watchdog.py` scripts in the machine-root Hermes `scripts/` directory, or an explicit `board_script` plugin setting.
-- Python 3.10 or newer on macOS or Linux. Receipt locking uses `fcntl`.
+- Python 3.11 or newer on macOS or Linux, matching the compatible Hermes host's supported runtime. Receipt locking uses `fcntl`.
 
 No model, provider, network, or messaging call is made by plugin registration, native readiness checks, wake polling, or the watchdog itself.
+
+### Older Hermes hosts
+
+The plugin probes the host API at registration time. If the module or context method is unavailable, registration logs exactly:
+
+```text
+This Hermes host does not provide the public native-turn-source API
+```
+
+The plugin then remains inactive without registering its CLI command or native source. Hermes continues loading, and the standalone coordination board remains usable. Upgrade to a Hermes build containing the API, restart the resident Hermes process, and run `hermes session-coord native-check --json` before relying on automatic continuation.
 
 ## Install, change your choice, or remove
 
@@ -36,6 +46,20 @@ upgrade from a reviewed, clean Git checkout. The installer uses Hermes's
 standard SHA-pinned plugin installation, Doctor, enablement, configuration and
 native-check commands. It does not weaken compatibility or trust checks.
 A locally edited/unverifiable existing plugin is preserved for manual review.
+
+Advanced users who already installed the board may use the standard Hermes
+plugin lifecycle directly. Replace the placeholder with a reviewed 40-character
+commit ID; do not install an unreviewed moving branch:
+
+```bash
+hermes plugins install P2ppyJack/session-coord-native --ref <40-character-commit-sha>
+hermes plugins enable session-coord-native
+hermes plugins doctor session-coord-native --ci
+```
+
+Restart resident Hermes processes after enabling. On a compatible host,
+`hermes session-coord native-check --json` must report `"supported": true`
+before automatic continuation is considered active.
 
 Removal uses Hermes's disable/remove operations, verifies a recovery copy,
 and removes only the native managed instruction block. Board files, claims,
@@ -111,7 +135,12 @@ to the `default` profile because the board and watchdog are machine-global.
 
 ## Failure behavior
 
-A missing, malformed, timed-out, or failing board command is inert to the host turn. Invalid exact targets are ignored. Native receipts are written atomically with profile-local locking. Scheduler setup failures return nonzero structured output and do not trigger automatic cleanup or a second create.
+A host without the proposed native-turn-source API gets the warning documented
+above and an inert plugin, not a failed Hermes startup. On a compatible host, a
+missing, malformed, timed-out, or failing board command is inert to the host
+turn. Invalid exact targets are ignored. Native receipts are written atomically
+with profile-local locking. Scheduler setup failures return nonzero structured
+output and do not trigger automatic cleanup or a second create.
 
 ## Tests
 
@@ -128,9 +157,8 @@ SESSION_COORD_TEST_BOARD_SCRIPT=/absolute/path/to/session_coord.py \
   python -m pytest -q tests/test_reference_integration.py
 ```
 
-To verify the canonical board against the real proposed host types, lease
-admission, durable receipt, and exact-event continuation (without the frozen ABI
-fixture), run:
+To verify the canonical board against the proposed host types, lease admission,
+durable receipt, and exact-event continuation, run:
 
 ```bash
 PYTHONPATH=/absolute/path/to/prepared/hermes \
@@ -138,4 +166,10 @@ SESSION_COORD_TEST_BOARD_SCRIPT=/absolute/path/to/canonical/session_coord.py \
   python -m pytest -q tests/test_canonical_board_contract.py
 ```
 
-This is a component-contract test, not resident Desktop/gateway activation proof.
+## License
+
+Licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Credits
+
+Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser.

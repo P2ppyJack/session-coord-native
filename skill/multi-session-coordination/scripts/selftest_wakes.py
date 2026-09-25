@@ -64,12 +64,12 @@ class WakeCLITest(unittest.TestCase):
         self.assertEqual(
             proc.returncode,
             rc,
-            msg=f"command: {' '.join(argv)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            f"command: {' '.join(argv)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
         )
         if not json_output:
             return proc
         lines = [line for line in proc.stdout.splitlines() if line.strip()]
-        self.assertTrue(lines, msg=f"no JSON output\nstderr:\n{proc.stderr}")
+        self.assertTrue(lines, f"no JSON output\nstderr:\n{proc.stderr}")
         try:
             return json.loads(lines[-1])
         except json.JSONDecodeError as exc:
