@@ -12,6 +12,7 @@ if __package__:
     from .session_coord_native_board import CoordinationBoardClient
     from .session_coord_native_receipts import (
         CoordinationReceiptError,
+        _ALLOWED_KINDS,
         begin_admission,
         board_receipt_from_native,
         confirm_admission,
@@ -26,6 +27,7 @@ else:
     from session_coord_native_board import CoordinationBoardClient
     from session_coord_native_receipts import (
         CoordinationReceiptError,
+        _ALLOWED_KINDS,
         begin_admission,
         board_receipt_from_native,
         confirm_admission,
@@ -153,6 +155,47 @@ class SessionCoordNativeSource:
         self.poll_interval_seconds = max(0.0, float(poll_interval_seconds))
         self._poll_lock = threading.Lock()
         self._next_poll: dict[tuple[str, str, str], float] = {}
+
+    def pending_targets(self, profile_home, surface):
+        """Exact native ids with a pending, deliverable wake event.
+
+        Optional host capability: the host may restore one of these sessions
+        before polling it. Only the board's public ``wake-pending`` payload is
+        read; a failure is inert and returns no targets.
+        """
+        surface = str(surface)
+        if surface not in self.surfaces:
+            return ()
+        home = Path(profile_home).expanduser().resolve()
+        try:
+            pending_events = self.board.pending(home)
+        except Exception:
+            logger.debug("session-coord pending_targets failed inertly", exc_info=True)
+            return ()
+        targets = []
+        seen = set()
+        for event in pending_events:
+            if str(event.get("board_status") or "pending") != "pending":
+                continue
+            if str(event.get("transport") or "hermes") != "hermes":
+                continue
+            try:
+                if Path(str(event.get("profile_home") or "")).expanduser().resolve() != home:
+                    continue
+            except (OSError, ValueError):
+                continue
+            target = event.get("target")
+            if not isinstance(target, dict):
+                continue
+            kind = str(target.get("kind") or "")
+            if kind not in _ALLOWED_KINDS.get(surface, frozenset()):
+                continue
+            session_id = str(event.get("native_session_id") or "").strip()
+            if not session_id or (session_id, surface) in seen:
+                continue
+            seen.add((session_id, surface))
+            targets.append({"session_id": session_id, "surface": surface, "kind": kind})
+        return tuple(targets)
 
     def poll(self, session: Any):
         if str(session.surface) not in self.surfaces:

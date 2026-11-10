@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
+### Added
+
+- Optional `pending_targets(profile_home, surface)` host capability: the adapter
+  reports the exact native sessions that have a pending, deliverable wake event,
+  so a host can restore a closed session before polling it. Only the board's
+  public `wake-pending` payload is read; a failure is inert and returns no
+  targets, and a host that does not call the method is unaffected.
+
 ## [0.2.0] - 2026-09-25
 
 ### Added

@@ -524,3 +524,56 @@ def test_tombstone_and_admission_commit_are_one_atomic_decision(plugin_loader, t
     stored = receipts.read_admission_receipt(home, event["event_id"])
     assert stored is not None
     assert stored["status"] == "canceled"
+
+
+def test_pending_targets_returns_only_exact_pending_deliverable_events(plugin_loader, tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    base = _event(home)
+    native_2 = _event(home, event_id="event-2", native_session_id="native-2")
+    native_2["target"] = dict(base["target"], session_id="native-2",
+                              compression_lineage=["native-2"])
+    leased = _event(home, event_id="event-3", native_session_id="native-3")
+    leased["target"] = dict(base["target"], session_id="native-3")
+    foreign = _event(tmp_path / "other", event_id="event-4", native_session_id="native-4")
+    foreign["target"] = dict(base["target"], session_id="native-4")
+
+    class Board:
+        def pending(self, _home):
+            return [
+                dict(base, board_status="pending"),
+                dict(native_2, board_status="pending"),
+                dict(leased, board_status="leased"),
+                dict(foreign, board_status="pending"),
+            ]
+
+    plugin = plugin_loader()
+    source = plugin.SessionCoordNativeSource(
+        board_script=tmp_path / "unused.py",
+        lease_type=FrozenNativeTurnLease,
+        surfaces=("cli", "tui", "gateway"),
+        board=Board(),
+    )
+
+    assert source.pending_targets(home, "tui") == ()
+    assert source.pending_targets(home, "cli") == (
+        {"session_id": "native-1", "surface": "cli", "kind": "cli"},
+        {"session_id": "native-2", "surface": "cli", "kind": "cli"},
+    )
+    assert source.pending_targets(tmp_path, "gateway") == ()
+
+
+def test_pending_targets_is_inert_when_board_raises(plugin_loader, tmp_path):
+    class BrokenBoard:
+        def pending(self, _home):
+            raise OSError("board unavailable")
+
+    plugin = plugin_loader()
+    source = plugin.SessionCoordNativeSource(
+        board_script=tmp_path / "unused.py",
+        lease_type=FrozenNativeTurnLease,
+        surfaces=("cli", "tui", "gateway"),
+        board=BrokenBoard(),
+    )
+
+    assert source.pending_targets(tmp_path, "cli") == ()

@@ -153,7 +153,7 @@ def test_manifest_names_standalone_plugin_and_declares_public_settings():
     manifest = yaml.safe_load((PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
 
     assert manifest["name"] == "session-coord-native"
-    assert manifest["version"] == "0.2.0"
+    assert manifest["version"] == "0.3.0"
     assert manifest["manifest_version"] == 2
     assert manifest["api_version"] == 1
     assert manifest["kind"] == "standalone"
