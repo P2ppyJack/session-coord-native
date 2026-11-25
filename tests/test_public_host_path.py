@@ -22,6 +22,8 @@ def test_public_discovery_admission_and_full_claim_revalidation(tmp_path, surfac
     board = os.environ.get("SESSION_COORD_TEST_BOARD_SCRIPT")
     if not host or not board:
         pytest.skip("requires a compatible real Hermes checkout and canonical board")
+    if not (Path(host) / "hermes_cli" / "native_turn_sources.py").is_file():
+        pytest.skip("host has no native-turn-source API; test_stock_host_path covers it")
     env = {
         "PATH": os.environ["PATH"],
         "HOME": str(tmp_path),

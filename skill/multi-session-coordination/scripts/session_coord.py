@@ -150,7 +150,15 @@ MIGRATIONS = {
 }
 
 DEFAULT_TTL_MIN = 90.0
-STALE_SESSION_S = 24 * 3600
+# v2.5: a session goes 'stale' after this much silence, and a stale holder's
+# claims are auto-reaped (released + waiters notified) so a session that
+# finished WITHOUT running `done` stops blocking co-workers. Configurable via
+# HERMES_COORD_STALE_S. Default 60m balances recall against safety: better than
+# the old 24h for finished-but-unreleased work, while a live session doing
+# quiet work is not mistaken for dead unless it stays silent a full hour.
+# Long-running holders should call the new `heartbeat` verb (every few minutes)
+# so this never misfires on busy-but-silent work.
+STALE_SESSION_S = float(os.environ.get("HERMES_COORD_STALE_S", str(60 * 60)))
 EXPIRED_KEEP_S = 7 * 24 * 3600
 POLL_FRESH_S = 30               # a waiter fences only while actively polling
                                 # (claim --wait touches last_poll every ~4s);
@@ -202,7 +210,12 @@ BOARD_WIRE_BEGIN = "<!-- BEGIN session-coord managed board-v2 -->"
 BOARD_WIRE_END = "<!-- END session-coord managed board-v2 -->"
 BOT_BOARD_WIRE_BEGIN = "<!-- BEGIN session-coord managed bot-board-v2 -->"
 BOT_BOARD_WIRE_END = "<!-- END session-coord managed bot-board-v2 -->"
-BOARD_WIRE_HASH = "b77c3929f040771f801828141074975c0e7d808f1a7b926027d1d71980332900"
+# Accepted board-v2 fingerprints: the current block and the 2.6.1 block (same
+# protocol; only its register example differs).
+BOARD_WIRE_HASHES = frozenset({
+    "eb63d57a3bd8ac941a55668d2acc1a20f53592f5668701fa2a58729b03208b2f",
+    "b77c3929f040771f801828141074975c0e7d808f1a7b926027d1d71980332900",
+})
 BOT_BOARD_WIRE_HASH = "ec85e48d40b01f3fdc502e99d00808c3b935ba6f9504b949b246a7fdd7e5abab"
 
 
@@ -230,7 +243,7 @@ def _current_memory_enrollment(text):
     if block.count(prefix) != 5:
         return False
     normalized = block.replace(prefix, "python3 {sc}")
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest() == BOARD_WIRE_HASH
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest() in BOARD_WIRE_HASHES
 
 
 def _current_bot_enrollment(text, botname):
@@ -459,9 +472,18 @@ def resolve_session(conn, token):
 # ---------------------------------------------------------------- db helpers
 
 def touch_session(conn, sid):
-    """Update last_seen for liveness tracking (called on every verb)."""
+    """Update last_seen for liveness tracking (called on every verb).
+
+    A verb is proof the session is alive, so a stale row is revived here.  Without
+    this a session that went stale (an hour without a board call) and then parked
+    with `claim --yield` kept status='stale'; episode_ready() requires 'active', so
+    the release after it never enqueued a wake event and the park waited forever.
+    """
     if sid:
-        conn.execute("UPDATE sessions SET last_seen=? WHERE id=?", (now(), sid))
+        conn.execute(
+            "UPDATE sessions SET last_seen=?, "
+            "status=CASE WHEN status='stale' THEN 'active' ELSE status END WHERE id=?",
+            (now(), sid))
 
 
 def notify(conn, to_session, from_session, resource, kind, body, dedupe=False):
@@ -503,8 +525,11 @@ def alert_pending(conn, sid):
 
 def reap(conn):
     """Expire overdue claims (warn their waiters), stale sessions, dead-session
-    waiters, old rows. Caller must hold a write transaction."""
+    waiters, old rows. Caller must hold a write transaction. v2.5 also auto-REAPS
+    the held claims of a session that went stale (no heartbeat beyond the stale
+    window), so a finished-but-unreleased holder stops blocking co-workers."""
     t = now()
+    reaped = 0
     expired = conn.execute(
         "SELECT * FROM claims WHERE status='held' AND claimed_at + ttl_min*60 < ?", (t,)
     ).fetchall()
@@ -554,6 +579,56 @@ def reap(conn):
         "AND id NOT IN (SELECT session_id FROM wait_episodes WHERE status='waiting')",
         (t - STALE_SESSION_S,),
     )
+    # A waiting episode keeps its session alive by definition (the staleness sweep
+    # above excludes it), and episode_ready() requires 'active'.  Revive a row
+    # already marked stale while it has a waiting episode, so a session that went
+    # stale BEFORE parking (the old touch_session gap) heals on the next command
+    # instead of leaving its wake event unenqueueable forever.
+    conn.execute(
+        "UPDATE sessions SET status='active' WHERE status='stale' "
+        "AND id IN (SELECT session_id FROM wait_episodes WHERE status='waiting')"
+    )
+    # v2.5: auto-REAP the held claims of every session that has gone stale. This
+    # recovers the "co-worker says WAITING, but the holder finished without
+    # running `done`" case directly, instead of letting the claim ride until its
+    # TTL (90-240m). Claims are marked 'reaped' (automatic + audited, distinct
+    # from a user-issued 'stolen'), the holder and its waiters are notified with
+    # the same VERIFY-resource-state caveat as TTL expiry, and nothing here ever
+    # touches a remote process — the board stays advisory.
+    for sid in [r["id"] for r in conn.execute(
+            "SELECT id FROM sessions WHERE status='stale'").fetchall()]:
+        for c in conn.execute(
+                "SELECT * FROM claims WHERE status='held' AND session_id=?",
+                (sid,)).fetchall():
+            conn.execute(
+                "UPDATE claims SET status='reaped', released_at=? WHERE id=?",
+                (t, c["id"]),
+            )
+            reaped += 1
+            notify(
+                conn, c["session_id"], None, c["resource"], "reaped",
+                f"Your claim on {c['resource']} was auto-REAPED because session "
+                f"{short(c['session_id'])} went stale (no heartbeat for a full "
+                f"stale window). The resource's real state is NOT verified — "
+                f"check it before you resume.",
+                dedupe=True,
+            )
+            for w in conn.execute(
+                    "SELECT * FROM waiters WHERE active=1 AND session_id != ?",
+                    (c["session_id"],)).fetchall():
+                if resources_overlap(norm_resource(w["resource"]), c["resource"]):
+                    notify(
+                        conn, w["session_id"], c["session_id"], c["resource"],
+                        "reaped",
+                        f"Claim on {c['resource']} was REAPED (holder "
+                        f"{short(c['session_id'])} went stale, task "
+                        f"'{c['task']}'). The board now shows it free — VERIFY its "
+                        f"real state before proceeding.",
+                        dedupe=True,
+                    )
+                    if w["episode_id"] is None:
+                        conn.execute("UPDATE waiters SET active=0 WHERE id=?",
+                                     (w["id"],))
     conn.execute(
         "UPDATE waiters SET active=0 WHERE active=1 AND session_id IN "
         "(SELECT id FROM sessions WHERE status IN ('done','stale')) "
@@ -561,14 +636,21 @@ def reap(conn):
         "(SELECT episode_id FROM wait_episodes WHERE status='waiting'))"
     )
     conn.execute(
-        "DELETE FROM claims WHERE status IN ('released','expired','stolen') AND released_at < ?",
+        "DELETE FROM claims WHERE status IN ('released','expired','stolen','reaped') "
+        "AND released_at < ?",
         (t - EXPIRED_KEEP_S,),
     )
     conn.execute(
         "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at < ?",
         (t - EXPIRED_KEEP_S,),
     )
-    return _schedule(conn, "ttl_expired" if expired else "reconciled")
+    if expired:
+        ev = "ttl_expired"
+    elif reaped:
+        ev = "stale_reaped"
+    else:
+        ev = "reconciled"
+    return _schedule(conn, ev)
 
 
 def holders_of(conn, resource, mode, exclude_session):
@@ -872,6 +954,10 @@ def upcoming_cron_conflicts(resources, horizon_s):
             continue
         eta = j["next_ts"] - t
         if eta < -300 or eta > horizon_s:  # small grace for a just-fired tick
+            continue
+        # Read-only jobs (backups, snapshots) never claim, so they never conflict:
+        # asking a session to step aside for one is noise.
+        if spec.get("policy") == "readonly":
             continue
         for jr in spec["resources"]:
             for r in resources:
@@ -1310,6 +1396,17 @@ def cmd_claim(a):
             return 1
         a.checkpoint = checkpoint
     conn = db()
+    # v2.5: reject a malformed --id before it can auto-create an undressable
+    # orphan session. The '#   e388'-style rows came from capturing non-JSON
+    # `register` output (newlines + '# ' comment lines) into the id. Enforce the
+    # same regex `register` uses on `--id`; a claim under a bad id must fail
+    # loudly, never mint an orphan. (`claim` is NOT in _ID_RESOLVING_VERBS, so
+    # the id arrives raw here and must be validated.)
+    if a.id and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{3,63}$", a.id):
+        print(f"error: --id '{a.id}' malformed — use `register --json` (or "
+              "capture only the first line) to mint a clean session id, then "
+              "claim under it", file=sys.stderr)
+        return 1
     # Orphan-proofing (v2.3.2): a claim under an id that was never registered
     # auto-creates a minimal session row, so release/done can always resolve
     # the id later. Claims must never be easier to make than to release.
@@ -1845,6 +1942,10 @@ def cmd_status(a):
     conn = db()
     conn.execute("BEGIN IMMEDIATE")
     reap(conn)
+    # v2.5: `status` is itself a board interaction — refresh the caller's
+    # liveness so a session that polls `status` on a long task is never mistaken
+    # for dead and auto-reaped (only truly silent holders go stale).
+    touch_session(conn, a.id)
     conn.execute("COMMIT")
     t = now()
     sess = conn.execute(
@@ -1857,7 +1958,8 @@ def cmd_status(a):
     waiters = conn.execute(
         "SELECT * FROM waiters WHERE active=1 ORDER BY since").fetchall()
     recent_expired = conn.execute(
-        "SELECT * FROM claims WHERE status IN ('expired','stolen') AND released_at > ? "
+        "SELECT * FROM claims WHERE status IN ('expired','stolen','reaped') "
+        "AND released_at > ? "
         "ORDER BY released_at DESC LIMIT 10", (t - 86400,),
     ).fetchall()
     payload = {
@@ -2015,6 +2117,20 @@ def cmd_steal(a):
     return 0
 
 
+def cmd_heartbeat(a):
+    """Verb: refresh this session's liveness stamp (no claim, no waiter row).
+    A long-running holder calls this periodically so the stale reaper never
+    mistakes it for a finished/dead session and auto-reaps its claims. Cheap and
+    idempotent; also refreshes HERMES_COORD_ID's row when set."""
+    conn = db()
+    conn.execute("BEGIN IMMEDIATE")
+    touch_session(conn, a.id)
+    conn.execute("COMMIT")
+    emit({"ok": True, "session": short(a.id), "heartbeat_at": now()}, a.json,
+         [f"heartbeat {short(a.id)} — liveness refreshed."])
+    return 0
+
+
 # ---------------------------------------------------------------- cron commands
 
 def resolve_cron_job(token):
@@ -2068,6 +2184,16 @@ def cmd_cron_guard(a):
             return 1
         if job_id and job_id in man:
             resources.extend(r for r in man[job_id]["resources"] if r not in resources)
+            # Read-only jobs (backups, snapshots) do not observe claims: they capture
+            # whatever state exists. Exit 0 with NO stdout so the caller's guard id
+            # stays empty and the job proceeds unguarded.
+            if man[job_id].get("policy") == "readonly":
+                print(
+                    f"cron-guard: '{job_name}' is read-only (manifest policy=readonly) "
+                    f"-- no claims taken, running unguarded",
+                    file=sys.stderr,
+                )
+                return 0
     if not resources:
         print("cron-guard: no resources (give --res and/or a manifested --job)",
               file=sys.stderr)
@@ -2598,6 +2724,11 @@ def main():
     sp = sub.add_parser("status", help="the whole board: sessions, claims, waiters, warnings")
     common(sp)
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("heartbeat",
+                        help="refresh my liveness stamp (prevents stale auto-reap)")
+    common(sp)
+    sp.set_defaults(fn=cmd_heartbeat)
 
     sp = sub.add_parser("prioritize", help="record the USER's priority order (live re-fence)")
     sp.add_argument("--id", default=os.environ.get("HERMES_COORD_ID"),

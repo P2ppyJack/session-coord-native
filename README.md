@@ -1,24 +1,58 @@
 # session-coord-native
 
-`session-coord-native` is a standalone Hermes plugin that admits exact `session-coord` wake events through Hermes's native-turn-source API. The coordination board remains framework-neutral and authoritative for waits, leases, and results; the plugin stores only receiver-side admission receipts and user-boundary tombstones.
+`session-coord-native` is a standalone Hermes plugin that delivers exact `session-coord` wake events as Hermes turns. It installs directly into stock Hermes; no patched Hermes build is needed. The coordination board remains framework-neutral and authoritative for waits, leases, and results; the plugin stores only receiver-side admission receipts and user-boundary tombstones.
 
 ## Requirements
 
-- A Hermes build that exposes `PluginContext.register_native_turn_source(...)`, `NativeSessionView`, and `NativeTurnLease`. For version 0.2.0, that public host API is proposed in [NousResearch/hermes-agent#110232](https://github.com/NousResearch/hermes-agent/pull/110232); it is not yet in a released Hermes version.
-- The framework-neutral `session_coord.py` and `coord_resume_watchdog.py` scripts in the machine-root Hermes `scripts/` directory, or an explicit `board_script` plugin setting.
-- Python 3.11 or newer on macOS or Linux, matching the compatible Hermes host's supported runtime. Receipt locking uses `fcntl`.
+- Stock Hermes **v0.23.3 or newer** (`requires_hermes: ">=0.23.3"` in `plugin.yaml`).
+- The framework-neutral `session_coord.py` (board **2.6.4 or newer**) and `coord_resume_watchdog.py` scripts in the machine-root Hermes `scripts/` directory, or an explicit `board_script` plugin setting.
+- Python 3.11 or newer on macOS or Linux, matching Hermes's supported runtime. Receipt locking uses `fcntl`.
 
-No model, provider, network, or messaging call is made by plugin registration, native readiness checks, wake polling, or the watchdog itself.
+No model, provider, network, or messaging call is made by plugin registration, readiness checks, wake polling, or the watchdog itself.
 
-### Older Hermes hosts
+## Delivery paths
 
-The plugin probes the host API at registration time. If the module or context method is unavailable, registration logs exactly:
+The plugin chooses one delivery path at registration (`delivery` setting, default `auto`):
+
+| Path | Host | How a wake arrives |
+|---|---|---|
+| `inject` | stock Hermes v0.23.3+ | the plugin leases the wake and calls the public `PluginContext.inject_message(prompt, session_key=...)`; the `pre_llm_call` hook of the turn that carries the prompt confirms admission |
+| `native` | a host that also publishes `PluginContext.register_native_turn_source(...)` (proposed in [NousResearch/hermes-agent#110232](https://github.com/NousResearch/hermes-agent/pull/110232)) | the host polls the plugin's source at its idle turn boundary |
+
+`auto` selects `native` when the registrar exists and `inject` otherwise. A process never runs both.
+
+### Stock-host (`inject`) requirements and limits
+
+- **Consent key.** Hermes refuses a plugin's injected turn unless
+  `plugins.entries.session-coord-native.allow_gateway_injection` is `true`. The board's
+  `hermes_setup.py setup` sets it; `native-check` reports it as `gateway_injection_allowed`.
+- **Joined delegation.** A parent must join its children before its turn ends. On a stock
+  host that is `delegation.gateway_mode: inline`, also set by `hermes_setup.py setup`.
+- **Exact target.** At park time the board records the conversation's gateway route
+  (`HERMES_SESSION_KEY`) as `delivery_session_key`. The plugin delivers only to a session
+  this Hermes process has observed through its own hooks, and only by that exact key. A
+  recorded key that disagrees with the live session's key is never delivered.
+- **Closed conversations wait.** A wake for a Desktop conversation that no running Hermes
+  process hosts stays pending until that conversation is opened again; the plugin cannot
+  reopen it.
+- **Admission is observed, not fenced.** The host does not report when an injected turn is
+  admitted, so the plugin confirms it from the `pre_llm_call` hook carrying the exact
+  prompt. If a person types into the session first, that turn cancels the session's waits
+  (the same user-boundary rule as the native path); a prompt the plugin does not observe
+  within two hours is recorded `unknown` and never resent.
+- **Classic CLI REPL.** The classic REPL queues injected text into its own conversation
+  regardless of key, so it is never treated as a delivery target unless it has itself been
+  observed as the parked session.
+
+### Hosts with neither API
+
+If the host provides neither the registrar nor `inject_message` and hooks, registration logs:
 
 ```text
-This Hermes host does not provide the public native-turn-source API
+This Hermes host provides neither the native-turn-source API nor PluginContext.inject_message and hooks
 ```
 
-The plugin then remains inactive without registering its CLI command or native source. Hermes continues loading, and the standalone coordination board remains usable. Upgrade to a Hermes build containing the API, restart the resident Hermes process, and run `hermes session-coord native-check --json` before relying on automatic continuation.
+The plugin then stays inactive and registers no CLI command. Hermes continues loading, and the standalone board remains usable.
 
 ## Install, change your choice, or remove
 
@@ -57,9 +91,16 @@ hermes plugins enable session-coord-native
 hermes plugins doctor session-coord-native --ci
 ```
 
-Restart resident Hermes processes after enabling. On a compatible host,
-`hermes session-coord native-check --json` must report `"supported": true`
-before automatic continuation is considered active.
+Restart resident Hermes processes after enabling. `hermes session-coord
+native-check --json` must report `"supported": true` before automatic
+continuation is considered active. On a stock host it reports
+`"delivery": "inject"`; with the standard lifecycle alone you must also set the
+consent key and joined-delegation mode yourself:
+
+```bash
+hermes config set plugins.entries.session-coord-native.allow_gateway_injection true
+hermes config set delegation.gateway_mode inline
+```
 
 Removal uses Hermes's disable/remove operations, verifies a recovery copy,
 and removes only the native managed instruction block. Board files, claims,
@@ -77,6 +118,7 @@ Settings are read through `PluginContext.get_config` from the plugin's settings 
 
 - `board_script`: optional path to `session_coord.py`. Empty uses the machine-root `~/.hermes/scripts/session_coord.py`, even for a named profile.
 - `supported_surfaces`: non-empty unique subset of `cli`, `tui`, and `gateway`. Default: all three.
+- `delivery`: `auto` (default), `native`, or `inject`. `native` on a host without the registrar, or `inject` on a host without `inject_message`, logs a warning and stays inactive.
 
 Example:
 
@@ -85,7 +127,7 @@ hermes -p PROFILE config set plugins.entries.session-coord-native.settings.suppo
 hermes -p PROFILE config set plugins.entries.session-coord-native.settings.board_script /absolute/path/to/session_coord.py
 ```
 
-## Native admission behavior
+## Native admission behavior (`native` path)
 
 The host calls the source only at its proven idle/owned turn boundary. The plugin then:
 
@@ -133,10 +175,31 @@ not force-run a newly scheduled job from the fresh CLI process; the latest
 recorded execution health is reported separately. Setup mutation is restricted
 to the `default` profile because the board and watchdog are machine-global.
 
+## Stock-host delivery behavior (`inject` path)
+
+A background thread (started by the first hook, stopped on plugin unload) runs one
+pass every few seconds while a session this process hosts has a waiting episode,
+and every 30 seconds otherwise. Each pass:
+
+1. reads episodes and events through `wake-pending`;
+2. skips any event whose receiver this process has not observed, whose surface is not
+   configured, or that has no delivery key;
+3. validates the exact profile home, receiver session and target kind, then acquires one
+   event with `wake-lease`;
+4. writes an `attempting` receiver receipt and calls `inject_message` with the exact key;
+5. on refusal, records `not_sent` (the board re-pends the event) and backs off,
+   doubling up to ten minutes;
+6. on acceptance, waits for the `pre_llm_call` hook that carries the prompt, then commits an
+   `admitted` receipt and acknowledges the event through `wake-result` before the model
+   call starts.
+
+Stop (an interrupted session end), `/new`, and session deletion tombstone the session's
+waits and cancel them on the board. Closing a viewer does not.
+
 ## Failure behavior
 
-A host without the proposed native-turn-source API gets the warning documented
-above and an inert plugin, not a failed Hermes startup. On a compatible host, a
+A host with neither delivery API gets the warning documented above and an inert
+plugin, not a failed Hermes startup. On a supported host, a
 missing, malformed, timed-out, or failing board command is inert to the host
 turn. Invalid exact targets are ignored. Native receipts are written atomically
 with profile-local locking. Scheduler setup failures return nonzero structured
@@ -157,14 +220,20 @@ SESSION_COORD_TEST_BOARD_SCRIPT=/absolute/path/to/session_coord.py \
   python -m pytest -q tests/test_reference_integration.py
 ```
 
-To verify the canonical board against the proposed host types, lease admission,
-durable receipt, and exact-event continuation, run:
+To verify stock-host delivery against a real Hermes checkout's plugin manager,
+`inject_message` consent gate and hook dispatch, plus the canonical board:
 
 ```bash
-PYTHONPATH=/absolute/path/to/prepared/hermes \
+PYTHONPATH=/absolute/path/to/hermes \
+SESSION_COORD_TEST_HERMES_ROOT=/absolute/path/to/hermes \
 SESSION_COORD_TEST_BOARD_SCRIPT=/absolute/path/to/canonical/session_coord.py \
-  python -m pytest -q tests/test_canonical_board_contract.py
+  python -m pytest -q tests
 ```
+
+Use an interpreter whose `hermes_cli` resolves only to that checkout: an editable
+Hermes install in the same environment can satisfy imports from a different tree.
+On a host with the native-turn-source API the same command also runs the native
+real-host tests; on a stock host they skip and the stock-host tests run instead.
 
 ## License
 
@@ -172,4 +241,4 @@ Licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Credits
 
-Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser.
+Prepared by a Custom Agentic Assistant built and developed in part by Tobias Musser.

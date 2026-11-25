@@ -9,13 +9,21 @@ permissions:
 concurrency:
   group: native-tests-${{ github.ref }}
   cancel-in-progress: true
+# Every ${{ }} below is a literal matrix value or a runner path; no event-supplied
+# text reaches a run step or a checkout ref.
 jobs:
   validate:
-    # The validator's capability probe cannot return a live native-turn registration
-    # handle, so manifest and registration are validated on the current Hermes
-    # release, where the plugin must load and stay inert.
+    # Stock Hermes releases: manifest, registration and the stock-host delivery
+    # path must validate with no private-import or undeclared-hook findings.
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        hermes:
+          - { tag: v0.23.3, sha: caafe5389ae585ef77387a962aee05b1bcf17029 }
+          - { tag: v0.23.4, sha: 8fc0374447313e276f6b9a2764bfc750190c966a }
+    name: validate (Hermes ${{ matrix.hermes.tag }})
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -24,20 +32,38 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: NousResearch/hermes-agent
-          ref: f97608f178d1ffeca59860195ab7da295f7c8e5f # v2026.9.24
+          ref: ${{ matrix.hermes.sha }}
           path: hermes
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
         with:
-          python-version: '3.11'
-      - name: Install current Hermes release
-        run: python -m pip install -e "${{ github.workspace }}/hermes"
+          version: "0.12.13"
+      - name: Install stock Hermes (its own locked environment)
+        # Stock Hermes declares its core dependencies for Python 3.14 and installs
+        # from uv.lock; this is the same command its own CI runs.
+        working-directory: hermes
+        run: uv sync --locked --python 3.14
       - name: Validate plugin manifest and registration
         working-directory: plugin
         env:
           HERMES_HOME: ${{ runner.temp }}/hermes-validation-home
-          PYTHONPATH: ${{ github.workspace }}/hermes
-        run: hermes plugins validate . --json
+        run: |
+          ../hermes/.venv/bin/hermes plugins validate . --json | tee "$RUNNER_TEMP/validate.json"
+          python3 - "$RUNNER_TEMP/validate.json" <<'EOF'
+          import json, sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert report.get("ok") is True, report
+          private = [w for w in report.get("warnings") or [] if "private core imports" in w]
+          assert not private, private
+          EOF
+      - name: Plugin Doctor (no warnings)
+        working-directory: plugin
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-validation-home
+        run: |
+          ../hermes/.venv/bin/hermes plugins doctor . --ci | tee "$RUNNER_TEMP/doctor.txt"
+          if grep -q 'WARN' "$RUNNER_TEMP/doctor.txt"; then exit 1; fi
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -45,7 +71,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ['3.11', '3.13']
+        hermes:
+          - { tag: v0.23.3, sha: caafe5389ae585ef77387a962aee05b1bcf17029 }
+          - { tag: v0.23.4, sha: 8fc0374447313e276f6b9a2764bfc750190c966a }
+    name: test (${{ matrix.os }}, Hermes ${{ matrix.hermes.tag }})
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -53,27 +82,32 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: P2ppyJack/hermes-agent
-          ref: 6b7a3ef05121c8b27598898c0b181b6a209b8889
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.hermes.sha }}
           path: hermes
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: P2ppyJack/session-coord
-          ref: 1d2396f1b1378592cb9a3d16488e902e7ba403d6
+          ref: d27c407e4e0a7d6940ae975414d9248fe1d26a11 # board 2.6.4
           path: board
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
         with:
-          python-version: ${{ matrix.python }}
-      - name: Install compatible host test dependencies
-        run: python -m pip install -e "${{ github.workspace }}/hermes[dev]"
-      - name: Verify optional plugin
+          version: "0.12.13"
+      - name: Install stock Hermes (its own locked environment) and the test runner
+        working-directory: hermes
+        run: |
+          uv sync --locked --python 3.14
+          uv pip install --python .venv/bin/python pytest==8.3.5
+      - name: Verify plugin against stock Hermes
         working-directory: plugin
         env:
           HERMES_HOME: ${{ runner.temp }}/hermes-test-home
+          PYTHONDONTWRITEBYTECODE: "1"
           PYTHONPATH: ${{ github.workspace }}/hermes
           SESSION_COORD_TEST_HERMES_ROOT: ${{ github.workspace }}/hermes
           SESSION_COORD_TEST_BOARD_INSTALLER: ${{ github.workspace }}/board/install.py
           SESSION_COORD_TEST_BOARD_SCRIPT: ${{ github.workspace }}/board/skills/multi-session-coordination/scripts/session_coord.py
-        run: python -m pytest -q tests
+        run: ../hermes/.venv/bin/python -m pytest -q -rs tests

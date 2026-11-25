@@ -142,6 +142,12 @@ def parse_registration_target(raw_json, native_session_id, wake_transport, surfa
             "kind": surface,
             "session_id": native,
         }
+        # The gateway route of the parked conversation. A stock Hermes host delivers a
+        # wake through the public plugin API by this exact key. Stored under its own
+        # name: a host-admitted receiver validates `session_key` against its own view.
+        delivery_key = (env.get("HERMES_SESSION_KEY") or "").strip()
+        if delivery_key:
+            target["delivery_session_key"] = delivery_key
         transport = transport or "hermes"
 
     any_wake = bool(native or transport or target)
@@ -181,6 +187,13 @@ def parse_registration_target(raw_json, native_session_id, wake_transport, surfa
         not isinstance(target["profile"], str) or not target["profile"]
     ):
         return None, None, None, None, "wake target profile must be a non-empty string"
+    if "delivery_session_key" in target and (
+        not isinstance(target["delivery_session_key"], str)
+        or not target["delivery_session_key"].strip()
+    ):
+        return None, None, None, None, (
+            "wake target delivery_session_key must be a non-empty string"
+        )
     # Seed only the known receiver. A child actor is not its parent receiver,
     # and neither a profile label nor unobserved ancestry can be guessed here.
     lineage = target.setdefault("compression_lineage", [target["session_id"]])

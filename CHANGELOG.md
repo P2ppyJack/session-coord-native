@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
+### Added
+
+- Stock-host delivery (`delivery: inject`). On Hermes v0.23.3 or newer without the
+  native-turn-source registrar, the plugin leases a board wake and pushes the exact
+  prompt through the public `PluginContext.inject_message(..., session_key=...)` call,
+  then confirms admission from the `pre_llm_call` hook of the turn that carries it.
+  Delivery is limited to sessions the process has observed through its hooks and to
+  the wake's recorded `delivery_session_key` (board 2.6.4). Refusals record `not_sent`
+  and back off; an unobserved prompt becomes `unknown` and is never resent. A user
+  turn, Stop, `/new` or session deletion tombstones and cancels the session's waits.
+- `delivery` setting: `auto` (default; native when the registrar exists, otherwise
+  inject), `native`, or `inject`.
+- `native-check` on a stock host reports `delivery: "inject"`, the
+  `allow_gateway_injection` consent key, and `delegation.gateway_mode` as the
+  joined-delegation policy.
+- `requires_hermes: ">=0.23.3"` and `provides_hooks` in the manifest, so stock
+  `hermes plugins validate` passes.
+- Tests against a real stock Hermes plugin manager (TUI and gateway injection
+  slots, the consent refusal, and `auto`) and against the real board.
+
+### Changed
+
+- The private `hermes_cli.native_turn_sources` import happens only when the host
+  provides the registrar; stock hosts import no private Hermes module at load.
+- CI validates and tests against stock Hermes v0.23.3 and v0.23.4 instead of a
+  patched fork.
+- The bundled skill reference copy is synced to board 2.6.4.
+- README byline uses the standard project credit.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added

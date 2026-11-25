@@ -83,6 +83,13 @@ class CoordinationBoardClient:
             return None
 
     def pending(self, profile_home: Path | str) -> list[dict[str, Any]]:
+        snapshot = self.snapshot(profile_home)
+        return snapshot[1] if snapshot is not None else []
+
+    def snapshot(
+        self, profile_home: Path | str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+        """Waiting episodes and flattened outbox events for one profile, or ``None``."""
         response = self._run(
             [
                 "wake-pending",
@@ -91,11 +98,15 @@ class CoordinationBoardClient:
                 "--json",
             ]
         )
-        payload = response[1] if response is not None else None
+        if response is None:
+            return None
+        payload = response[1]
+        episodes: list[dict[str, Any]] = []
         if isinstance(payload, list):
             rows = payload
         elif isinstance(payload, dict):
             rows = payload.get("events", payload.get("pending", payload.get("wakes", [])))
+            episodes = [dict(row) for row in payload.get("episodes") or [] if isinstance(row, dict)]
         else:
             rows = []
         events: list[dict[str, Any]] = []
@@ -109,7 +120,7 @@ class CoordinationBoardClient:
                 events.append(event)
             else:
                 events.append(dict(row))
-        return events
+        return episodes, events
 
     def lease(
         self,

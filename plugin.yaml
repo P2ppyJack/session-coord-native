@@ -1,15 +1,26 @@
 name: session-coord-native
-version: 0.3.0
+version: 0.4.0
 manifest_version: 2
 api_version: 1
 kind: standalone
-description: Admit exact session-coord wake events as native Hermes turns
+description: Deliver exact session-coord wake events as Hermes turns
 license: MIT
 homepage: https://github.com/P2ppyJack/session-coord-native
+requires_hermes: ">=0.23.3"
 platforms:
   - linux
   - macos
 python_dependencies: []
+# Registered only by the stock-host (inject) delivery path; the native path registers none.
+provides_hooks:
+  - pre_llm_call
+  - on_session_start
+  - on_session_open
+  - on_session_end
+  - on_session_reset
+  - on_session_delete
+  - on_session_finalize
+  - post_tool_call
 tags:
   - coordination
   - continuation
@@ -26,3 +37,7 @@ config_schema:
       - tui
       - gateway
     description: Native Hermes surfaces on which coordination turns may be admitted.
+  delivery:
+    type: str
+    default: auto
+    description: "auto, native, or inject. auto uses the host's native-turn-source registrar when present, otherwise the public inject_message API."

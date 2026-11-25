@@ -52,6 +52,7 @@ class WakeCLITest(unittest.TestCase):
         )
         self.env.pop("HERMES_SESSION_ID", None)
         self.env.pop("HERMES_HOME", None)
+        self.env.pop("HERMES_SESSION_KEY", None)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -249,6 +250,54 @@ class WakeCLITest(unittest.TestCase):
                 "SELECT resource FROM claims WHERE session_id='waiter' AND status='held'"
             ).fetchall()
         self.assertEqual(held, [("res:A",)])
+
+    def test_stale_session_park_still_enqueues_its_release_wake(self):
+        """A session that went stale before parking must still wake on release.
+
+        Regression for T-61: touch_session() refreshed only last_seen, so the row
+        stayed 'stale'; episode_ready() requires 'active', and the holder's release
+        then enqueued nothing at all (empty outbox, wake_seq 0).
+        """
+        self.register("holder")
+        self.register("waiter")
+        self.run_cli("claim", "--id", "holder", "--res", "res:A")
+
+        # Simulate the reaper: an hour of board silence marks the row stale.
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE sessions SET status='stale' WHERE id='waiter'")
+
+        yielded, _ = self.yield_claim("waiter", ["res:A"])
+        self.assertTrue(yielded["yielded"])
+        # The park itself proves the session is alive: the verb must revive it.
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM sessions WHERE id='waiter'").fetchone()[0],
+                "active",
+            )
+
+        # Second half of the fix: a row already stale while its episode waits is
+        # revived by any command's reap(), not only by a verb from that session.
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE sessions SET status='stale' WHERE id='waiter'")
+        self.register("third")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM sessions WHERE id='waiter'").fetchone()[0],
+                "active",
+            )
+
+        self.run_cli("release", "--id", "holder", "--res", "res:A")
+        pending = self.run_cli("wake-pending", "--profile-home", str(self.profile))
+        self.assertEqual(len(pending["events"]), 1)
+        event = pending["events"][0]["event"]
+        self.assertEqual(event["native_session_id"], "native-waiter")
+        self.assertEqual(event["reason"], "released")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            seq = conn.execute(
+                "SELECT wake_seq FROM wait_episodes WHERE episode_id=?",
+                (event["episode_id"],),
+            ).fetchone()[0]
+        self.assertEqual(seq, 1)
 
     def test_partial_release_then_partial_ttl_expiry_wakes_only_full_set(self):
         self.register("hold-a")
@@ -684,6 +733,55 @@ class WakeCLITest(unittest.TestCase):
             "--kind", "desktop"
         )["event"]
         self.assertIsNotNone(event)
+
+    def test_register_auto_captures_delivery_session_key(self):
+        self.register("holder")
+        self.env["HERMES_SESSION_ID"] = "native-keyed"
+        self.env["HERMES_HOME"] = str(self.profile)
+        self.env["HERMES_SESSION_KEY"] = "agent:main:local:dm:native-keyed"
+        self.run_cli("register", "--id", "keyed", "--task", "keyed", "--surface", "desktop")
+        self.env.pop("HERMES_SESSION_KEY")
+        self.env["HERMES_SESSION_ID"] = "native-unkeyed"
+        self.run_cli("register", "--id", "unkeyed", "--task", "plain", "--surface", "desktop")
+        self.run_cli("claim", "--id", "holder", "--res", "res:A")
+        self.yield_claim("keyed", ["res:A"])
+        self.yield_claim("unkeyed", ["res:A"])
+        pending = self.run_cli("wake-pending", "--profile-home", str(self.profile))
+        targets = {ep["native_session_id"]: ep["target"] for ep in pending["episodes"]}
+        self.assertEqual(
+            targets["native-keyed"]["delivery_session_key"], "agent:main:local:dm:native-keyed"
+        )
+        # A host-admitted receiver validates `session_key`; the capture never writes it.
+        self.assertNotIn("session_key", targets["native-keyed"])
+        self.assertNotIn("delivery_session_key", targets["native-unkeyed"])
+        self.run_cli("release", "--id", "holder", "--res", "res:A")
+        event = self.run_cli(
+            "wake-lease", "--worker", "keyed-worker", "--transport", "hermes",
+            "--profile-home", str(self.profile), "--native-session-id", "native-keyed",
+            "--kind", "desktop"
+        )["event"]
+        self.assertEqual(
+            event["target"]["delivery_session_key"], "agent:main:local:dm:native-keyed"
+        )
+
+    def test_explicit_target_rejects_blank_delivery_session_key(self):
+        target = {
+            "profile_home": str(self.profile), "kind": "desktop", "session_id": "native-bad",
+            "delivery_session_key": "  ",
+        }
+        proc = self.run_cli(
+            "register", "--id", "bad-key", "--task", "bad", "--surface", "desktop",
+            "--native-session-id", "native-bad", "--wake-transport", "hermes",
+            "--wake-target-json", json.dumps(target), rc=1, json_output=False,
+        )
+        self.assertIn("delivery_session_key must be a non-empty string", proc.stderr)
+        target["delivery_session_key"] = "agent:main:local:dm:native-bad"
+        registered = self.run_cli(
+            "register", "--id", "good-key", "--task", "good", "--surface", "desktop",
+            "--native-session-id", "native-bad", "--wake-transport", "hermes",
+            "--wake-target-json", json.dumps(target),
+        )
+        self.assertEqual(registered["native_session_id"], "native-bad")
 
     def test_v2_migration_does_not_backfill_legacy_waiter(self):
         with closing(sqlite3.connect(self.db_path)) as conn, conn:

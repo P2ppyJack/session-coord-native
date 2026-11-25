@@ -1,7 +1,7 @@
 ---
 name: multi-session-coordination
 description: "Coordinate concurrent sessions: claim shared resources."
-version: 2.4.0
+version: 2.6.4
 author: Tobias Musser (P2ppyJack), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -49,9 +49,9 @@ recognized shipped wire-v1 blocks, backs up changed carriers, and preserves
 customized or malformed blocks as `ACTION NEEDED`. It never modifies the board
 DB or cron manifest.
 
-The installer copies the reconciliation watchdog and the optional native-turn
-plugin but does not schedule the watchdog, enable the plugin, start a model, or
-restart a process.
+The installer copies the reconciliation watchdog but does not schedule it. It
+also does not install a Hermes plugin, change Hermes configuration, start a
+model, or restart a process.
 
 ## How to Run
 
@@ -69,8 +69,8 @@ terminal(command='python3 ~/.hermes/scripts/session_coord.py done --id <ID>', ti
 If the claim says `HELD` or `QUEUED` (exit 75), do not mutate the requested
 resources. Use `check`/`inbox`, ask the holder for an ETA, or let a long-lived
 shell actor use one bounded `--wait` call. Do not use native `--yield` unless
-`hermes -p PROFILE session-coord native-check --json` reports support **and this
-receiver was started after the plugin was enabled**; a check subprocess cannot prove
+`hermes_setup.py check` succeeds for the exact profile **and this receiver was
+started after that configuration was written**; a check subprocess cannot prove
 that an older resident process loaded the plugin.
 
 ## Quick Reference
@@ -80,8 +80,10 @@ that an older resident process loaded the plugin.
 | `status [--json]` | Show sessions, claims, queues, cron radar, enrollment audits |
 | `register --task T [--surface S] [--parent P --slot a]` | Join the board |
 | `claim --id ID --res K [--res K...]` | Request an atomic all-or-nothing set |
+| `heartbeat --id ID` | Refresh liveness during quiet long-running work |
 | `check --res K` / `wait --res K` | Inspect or wait for availability |
 | `release --id ID [--res K]` / `done --id ID` | Release one/all and notify |
+| `coord_run.sh --task T --res K -- COMMAND` | Claim, run, and guarantee `done` on exit |
 | `inbox --id ID` | Read release, expiry, and preemption notices |
 | `prioritize --session ID --rank N` | Record a user-set priority |
 | `preempt --id ID --res K` | Ask a lower-priority holder to checkpoint/pause |
@@ -129,9 +131,15 @@ roots such as `file:~`.
   then `pause`. Chat negotiates an ETA; only `CLAIMED` authorizes mutation.
 - `steal` requires explicit user approval and a recorded reason.
 
-TTL expiry is not proof that the real resource is idle. Inspect resource state
-before the first mutation after an expired holder. Use a longer `--ttl` for
-multi-hour work and refresh the same idempotent claim after long interruptions.
+TTL expiry or stale-session auto-reaping is not proof that the real resource is
+idle. The default stale window is 60 minutes (`HERMES_COORD_STALE_S` overrides
+it); quiet long-running holders should run `heartbeat --id <ID>` every few
+minutes. Inspect resource state before the first mutation after an expired or
+reaped holder. Use a longer `--ttl` for multi-hour work and refresh the same
+idempotent claim after long interruptions. For one-shot shell work, use
+`coord_run.sh` so `done` runs after normal exit, failure, or termination. A
+session that runs any verb is revived from stale, and a waiting yield episode
+keeps its session active, so a holder's release always enqueues the wake.
 
 ### 3. Coordinate subagents and bots
 
@@ -179,39 +187,50 @@ pause with `cron-note`; never leave a critical deferral silent.
 Run `done --id <ID>` after all work and verification. Completion criterion:
 `status` shows none of this task's resources held and `inbox` has been checked.
 
-## Optional Native Continuation
+## Optional Native Continuation (Unreleased)
 
 Do not infer native support from a Hermes version, source file, or config key.
-A `session-coord-native` plugin and compatible Hermes host must pass the real
-registration and joined-policy checks.
+A separately supplied `session-coord-native` plugin and compatible Hermes host
+must pass the real registration and joined-policy checks. The repository-root
+helper is an operator utility and is not copied by a skill-only install.
 
-Run the read-only checks for each explicit profile:
-
-```python
-terminal(command='hermes -p default plugins doctor /absolute/path/to/session-coord-native --ci', timeout=120)
-terminal(command='hermes -p default session-coord native-check --json', timeout=120)
-```
-
-Explicit installation and enablement:
+From a repository checkout, run the read-only check for explicit profiles:
 
 ```python
-terminal(command='python3 install.py --profile default --json', timeout=300)
-terminal(command='hermes -p default plugins enable session-coord-native', timeout=120)
+terminal(command='python3 hermes_setup.py check --profile default --plugin-path /absolute/path/to/session-coord-native', timeout=120)
 ```
 
-Select profiles explicitly. The installer refuses divergent managed files
-without `--force`; the supported Hermes command performs enablement. Malformed
-JSON, unsupported host/policy, or partial command state is not readiness.
+Explicit setup:
+
+```python
+terminal(command='python3 hermes_setup.py setup --profile default --profile research --plugin-path /absolute/path/to/session-coord-native', timeout=300)
+```
+
+Use repeated `--profile` or explicit `--all-profiles`; selection is never
+implicit. The plugin path must be a clean Git worktree with committed bytes,
+because sanctioned local plugin installation clones its `file://` URL at an
+immutable commit.
+
+The helper preflights every selected profile before mutation. It uses Hermes
+Plugin Doctor, sanctioned plugin install/enable and config commands, exact readback
+of the delivery path's joined-delegation key, and plugin-owned `native-check`. On
+stock Hermes v0.23.3+ the plugin delivers through the public `inject_message` API:
+setup also sets its `allow_gateway_injection` consent key, and the joined key is
+`delegation.gateway_mode: inline` (a native-registrar host uses
+`delegation.wait_for_all: true`). A stock host delivers only to a conversation a
+running Hermes process hosts; a closed one waits until it is opened.
+Only after every profile passes does it write the separate managed native block.
+Malformed JSON, unsupported host/policy, custom enrollment, or partial command
+state returns not-ready and no misleading native instruction.
 
 A successful result is **configured on disk; restart required** because the
-plugin reports `activation=fresh_process_only`. These commands do not restart
+plugin reports `activation=fresh_process_only`. The helper does not restart
 Hermes or change model/provider settings.
 
 A shared script-only watchdog is an additional explicit opt-in:
 
 ```python
-terminal(command='hermes -p default session-coord watchdog-setup --json --check', timeout=120)
-terminal(command='hermes -p default session-coord watchdog-setup --json', timeout=300)
+terminal(command='python3 hermes_setup.py setup --profile default --plugin-path /absolute/path/to/session-coord-native --watchdog', timeout=300)
 ```
 
 Exactly one job is owned through profile `default`. Check mode calls the
@@ -224,15 +243,28 @@ retried. Details and recovery invariants are in
 - The board is advisory. A session that never loads the managed instruction can
   still collide; treat `UNENROLLED`/`UNWIRED` as real action items.
 - Board-only use is stable; native automatic continuation is separate and
-  optional. Never promise auto-resume before real registrar and policy checks.
+  unreleased. Never promise auto-resume after only `install.py`.
 - A native receipt proves prompt admission, not task completion. Unknown
   delivery outcomes are not retried blindly.
 - One-shot runs and children inherit no trustworthy target identity; never guess
   session/profile targets.
+- `register` may print informational lines after the id. Shell capture must keep
+  only its first line (or use JSON); malformed ids are rejected before claiming.
 - Fail-open protects liveness but means a board outage is "flying blind". Report
   it before shared mutation.
+- A job's footprint is wider than the resource set it declares. Individual stages
+  can run their own guards over resources the job never declares (for example a
+  backup stage taking a `cron-guard --policy skip --timeout 0` over skill
+  directories). While a job you triggered is still running, claim nothing any of
+  its stages touch: a held `skill:<name>` can turn such a stage into a silent
+  exit-75 deferral while every other stage passes, with no error surfaced.
 - A `wait-for-cron` call while still holding the conflicting resource can
   deadlock against a wait-policy guard.
+- The post-turn background skill review does not consult the board. It can edit a
+  skill you hold `skill:<name>` on between your own turns, so a claim never
+  freezes a skill: re-read it immediately before every write, and treat a failed
+  exact-match patch as proof the file moved rather than a reason to widen the
+  match.
 - `coord_guard.sh` and the shell suites require Bash, so the skill platform gate
   is Linux/macOS even though the Python engine itself is portable.
 - Use the `github` skill for repository operations. Unreleased notes remain
@@ -261,5 +293,4 @@ and end markers, not legacy marker counts.
 External Hermes/plugin integration may skip when those separately supplied
 components are absent. Such a skip verifies no native capability or live
 activation. Maintainer/release procedure is in `references/publishing-and-ci.md`.
-The standalone repository is MIT licensed and maintained by Tobias Musser
-(P2ppyJack), with implementation assistance from Hermes Agent.
+The standalone repository is MIT licensed.

@@ -23,8 +23,10 @@ mutation and then uses these sanctioned boundaries:
 hermes -p PROFILE plugins doctor /ABS/PLUGIN --ci
 hermes -p PROFILE plugins install file:///ABS/PLUGIN --ref FULL_SHA --no-enable
 hermes -p PROFILE plugins enable session-coord-native --no-allow-tool-override
-hermes -p PROFILE config set delegation.wait_for_all true
+hermes -p PROFILE config set delegation.wait_for_all true          # native-registrar host
 hermes -p PROFILE config get delegation.wait_for_all --json
+hermes -p PROFILE config set plugins.entries.session-coord-native.allow_gateway_injection true  # stock host
+hermes -p PROFILE config set delegation.gateway_mode inline        # stock host
 hermes -p PROFILE session-coord native-check --json
 ```
 
@@ -37,8 +39,10 @@ with:
 
 - `supported: true` only after real native-source registration;
 - a non-empty string list in `surfaces`;
-- `wait_for_all_supported: true` only when the public effective-policy helper
-  exists;
+- `wait_for_all_supported: true` only when the joined-delegation policy can be
+  read (the public effective-policy helper, or `delegation.gateway_mode` on a stock
+  host, reported as `wait_policy_key`);
+- on a stock host, `delivery: "inject"` and `gateway_injection_allowed: true`;
 - actual Boolean `wait_for_all: true` after setup;
 - `activation: "fresh_process_only"`;
 - a string `reason`.
@@ -141,8 +145,9 @@ before retrying.
 
 | Status | Recovery |
 |---|---|
-| `unsupported_host` | Install a Hermes build with the public native-turn-source registrar, then rerun `check` |
-| joined policy unsupported | Install the build containing the public effective delegation policy helper; do not set an unproven key |
+| `unsupported_host` | Update Hermes to v0.23.3 or newer (stock delivery) or a build with the native-turn-source registrar, then rerun `check` |
+| joined policy unsupported | On a native-registrar host, install the build containing the public effective delegation policy helper; do not set an unproven key |
+| stock host refuses wakes | `native-check` reports `gateway_injection_allowed: false`; run `setup`, or set `plugins.entries.session-coord-native.allow_gateway_injection: true` |
 | `action_needed` enrollment | Compare the preserved custom block with the managed example; merge manually, then rerun |
 | `partial` config/plugin setup | Rerun `check` first; do not hand-edit `config.yaml` |
 | uncertain watchdog create | Run `watchdog-setup --json --check`; never create a second job while state is unknown |

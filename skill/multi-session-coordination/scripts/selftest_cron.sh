@@ -301,12 +301,48 @@ JOUT=$(co status --json 2>/dev/null)
 if echo "$JOUT" | grep -q '"unwired_profiles".*plainprofile'; then ok "13b. --json carries unwired_profiles"; else bad "13b. $JOUT"; fi
 cat >> "$D/profiles/plainprofile/memories/MEMORY.md" <<'EOF'
 <!-- BEGIN session-coord managed board-v2 -->
-STANDING RULE — session-coord (board-wire v2): Before mutating shared resources (files, skills, memory, cron store, remote boxes, or desktop UI), first run `python3 /fixture/session_coord.py status`. Register once per task with `ID=$(python3 /fixture/session_coord.py register --task '...' --surface <surface>)`, then atomically claim every required resource with `python3 /fixture/session_coord.py claim --id $ID --res <key> [--res <key2>]`. Continue only after CLAIMED; when HELD/QUEUED, do not mutate the requested resources—use `check`, `inbox`, or one bounded `--wait` shell call and wait for release. Run `python3 /fixture/session_coord.py done --id $ID` at task end. Priorities are user-set; never `steal` without explicit approval. Full protocol: skill multi-session-coordination. Off-switch: `python3 /fixture/session_coord.py disable`.
+STANDING RULE — session-coord (board-wire v2): Before mutating shared resources (files, skills, memory, cron store, remote boxes, or desktop UI), first run `python3 /fixture/session_coord.py status`. Register once per task with `ID=$(python3 /fixture/session_coord.py register --task '...' --surface <surface> | head -1)` (its first output line is the ID; co-worker notes follow), then atomically claim every required resource with `python3 /fixture/session_coord.py claim --id $ID --res <key> [--res <key2>]`. Continue only after CLAIMED; when HELD/QUEUED, do not mutate the requested resources—use `check`, `inbox`, or one bounded `--wait` shell call and wait for release. Run `python3 /fixture/session_coord.py done --id $ID` at task end. Priorities are user-set; never `steal` without explicit approval. Full protocol: skill multi-session-coordination. Off-switch: `python3 /fixture/session_coord.py disable`.
 <!-- END session-coord managed board-v2 -->
 EOF
 OUT=$(co status 2>&1)
 if echo "$OUT" | grep -q "UNWIRED"; then bad "13c. managed rule should clear the flag: $OUT"; else ok "13c. managed standing rule clears the flag"; fi
+# 13d. a board-v2 block written by 2.6.1 is still an enrollment (install.py upgrades its text)
+mkdir -p "$D/profiles/olderprofile/memories"
+cat > "$D/profiles/olderprofile/memories/MEMORY.md" <<'EOF'
+<!-- BEGIN session-coord managed board-v2 -->
+STANDING RULE — session-coord (board-wire v2): Before mutating shared resources (files, skills, memory, cron store, remote boxes, or desktop UI), first run `python3 /fixture/session_coord.py status`. Register once per task with `ID=$(python3 /fixture/session_coord.py register --task '...' --surface <surface>)`, then atomically claim every required resource with `python3 /fixture/session_coord.py claim --id $ID --res <key> [--res <key2>]`. Continue only after CLAIMED; when HELD/QUEUED, do not mutate the requested resources—use `check`, `inbox`, or one bounded `--wait` shell call and wait for release. Run `python3 /fixture/session_coord.py done --id $ID` at task end. Priorities are user-set; never `steal` without explicit approval. Full protocol: skill multi-session-coordination. Off-switch: `python3 /fixture/session_coord.py disable`.
+<!-- END session-coord managed board-v2 -->
+EOF
+OUT=$(co status 2>&1)
+if echo "$OUT" | grep -q "UNWIRED"; then bad "13d. 2.6.1 managed rule should still count as wired: $OUT"; else ok "13d. 2.6.1 managed rule still counts as wired"; fi
 
+# --- 14. read-only jobs (policy=readonly) never claim and never raise advisories.
+#     Own store + manifest (earlier sections repoint both); a wait-policy twin is
+#     the negative control proving the advisory path really sees the job.
+NEXT7=$(python3 -c "from datetime import datetime,timedelta; print((datetime.now().astimezone()+timedelta(minutes=7)).isoformat())")
+export HERMES_COORD_CRON_JOBS="$D/jobs_ro.json"
+export HERMES_COORD_CRON_MANIFEST="$D/manifest_ro.json"
+printf '{"jobs":[{"id":"snapshotjob01","name":"tree snapshot","enabled":true,"next_run_at":"%s","last_run_at":null}]}\n' \
+  "$NEXT7" > "$HERMES_COORD_CRON_JOBS"
+ro_manifest(){
+  printf '{"jobs":{"snapshotjob01":{"name":"tree snapshot","resources":["file:%s/ro"],"policy":"%s","critical":true}}}\n' \
+    "$D" "$1" > "$HERMES_COORD_CRON_MANIFEST"
+}
+RS=$(co register --task "editing ro tree" | head -1)
+ro_manifest wait
+OUT=$(co claim --id "$RS" --res "file:$D/ro" --task edit 2>&1)
+if echo "$OUT" | grep -q "CRITICAL cron 'tree snapshot'"; then ok "14a. control: the same job with policy=wait raises the advisory"; else bad "14a. control saw no advisory: $OUT"; fi
+co release --id "$RS" --res "file:$D/ro" >/dev/null 2>&1
+ro_manifest readonly
+OUT=$(co claim --id "$RS" --res "file:$D/ro" --task edit 2>&1)
+if echo "$OUT" | grep -q "CLAIMED" && ! echo "$OUT" | grep -q "tree snapshot"; then ok "14b. policy=readonly raises no advisory on an overlapping claim"; else bad "14b. $OUT"; fi
+HELD_BEFORE=$(co status --json 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('held_claims') or []))")
+GOUT=$(co cron-guard --job snapshotjob01 2>"$D/roerr.txt"); RC=$?
+if [ $RC -eq 0 ] && [ -z "$GOUT" ]; then ok "14c. readonly cron-guard proceeds (rc 0, empty guard id) while the tree is held"; else bad "14c. rc=$RC out=$GOUT err=$(cat "$D/roerr.txt")"; fi
+if grep -q "read-only (manifest policy=readonly)" "$D/roerr.txt"; then ok "14d. readonly guard says why on stderr"; else bad "14d. $(cat "$D/roerr.txt")"; fi
+HELD=$(co status --json 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('held_claims') or []))")
+if [ -n "$HELD" ] && [ "$HELD" = "$HELD_BEFORE" ]; then ok "14e. readonly guard took no claim (held $HELD before and after)"; else bad "14e. held before=$HELD_BEFORE after=$HELD"; fi
+co "done" --id "$RS" >/dev/null 2>&1
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 rm -rf "$D"

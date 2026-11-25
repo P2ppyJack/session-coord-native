@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
 import json
+
+if __package__:
+    from .session_coord_native_host import delegation_policy_getter
+else:
+    from session_coord_native_host import delegation_policy_getter
 
 _MISSING_POLICY_REASON = (
     "Native turn source is registered in this fresh process; the host does not "
@@ -12,6 +16,10 @@ _MISSING_POLICY_REASON = (
 )
 _WATCHDOG_NAME = "session-coord-resume-watchdog"
 _WATCHDOG_SCRIPT = "coord_resume_watchdog.py"
+
+
+def _mapping(value) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def _watchdog_drift(job):
@@ -58,29 +66,77 @@ def _watchdog_drift(job):
 
 
 class SessionCoordCommand:
-    def __init__(self, *, ctx, native_handle, surfaces, board_script):
+    def __init__(self, *, ctx, native_handle, surfaces, board_script, delivery=None):
         self.ctx = ctx
         self.native_handle = native_handle
         self.surfaces = tuple(surfaces)
         self.board_script = board_script
+        self.delivery = delivery
 
     def __call__(self, args):
         if args.session_coord_command == "native-check":
+            if self.delivery is not None:
+                return self._inject_check(args)
             return self._native_check(args)
         if args.session_coord_command == "watchdog-setup":
             return self._watchdog_setup(args)
         raise ValueError(f"unknown session-coord command: {args.session_coord_command}")
+
+    def _inject_check(self, args):
+        """Readiness of stock-host delivery (``ctx.inject_message`` + plugin hooks)."""
+        plugin_id = str(getattr(self.ctx, "plugin_id", "") or "session-coord-native")
+        allowed = None
+        gateway_mode = None
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+        except Exception:
+            config = None
+        if isinstance(config, dict):
+            entries = _mapping(_mapping(config.get("plugins")).get("entries"))
+            allowed = _mapping(entries.get(plugin_id)).get("allow_gateway_injection") is True
+            delegation = _mapping(config.get("delegation"))
+            gateway_mode = str(delegation.get("gateway_mode") or "auto").strip().lower()
+        if allowed is None:
+            reason = "The profile configuration could not be read."
+        elif not allowed:
+            reason = (
+                f"Stock-host delivery needs plugins.entries.{plugin_id}.allow_gateway_injection: "
+                "true before the host accepts an injected wake."
+            )
+        elif gateway_mode != "inline":
+            reason = (
+                "Stock-host delivery is ready, but delegation.gateway_mode is "
+                f"{gateway_mode!r}; set it to 'inline' so a parent joins its children "
+                "before its turn ends."
+            )
+        else:
+            reason = (
+                "Stock-host delivery is ready in this fresh process; restart resident "
+                "Hermes processes to activate installed changes."
+            )
+        supported = allowed is True
+        payload = {
+            "supported": supported,
+            "delivery": "inject",
+            "gateway_injection_allowed": allowed,
+            "surfaces": list(self.surfaces) if supported else [],
+            "wait_for_all_supported": gateway_mode is not None,
+            "wait_for_all": (gateway_mode == "inline") if gateway_mode is not None else None,
+            "wait_policy_key": "delegation.gateway_mode",
+            "activation": "fresh_process_only",
+            "reason": reason,
+        }
+        print(json.dumps(payload, sort_keys=True) if args.json else reason)
+        return 0 if supported else 1
 
     def _native_check(self, args):
         handle_live = getattr(self.native_handle, "active", False) is True
         wait_supported = False
         wait_for_all = None
         reason = _MISSING_POLICY_REASON
-        try:
-            policy_module = importlib.import_module("tools.delegate_tool_config")
-            policy_getter = policy_module.get_delegation_execution_policy
-        except (ImportError, AttributeError):
-            policy_getter = None
+        policy_getter = delegation_policy_getter()
         if policy_getter is not None:
             try:
                 policy = policy_getter()

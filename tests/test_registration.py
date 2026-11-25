@@ -8,7 +8,11 @@ import sys
 import types
 
 import pytest
-import yaml
+
+try:  # stock Hermes v0.23+ ships ruamel.yaml behind its published ``hermes_yaml``
+    import hermes_yaml as yaml
+except ImportError:
+    import yaml
 
 from conftest import PLUGIN_ROOT
 
@@ -153,7 +157,7 @@ def test_manifest_names_standalone_plugin_and_declares_public_settings():
     manifest = yaml.safe_load((PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
 
     assert manifest["name"] == "session-coord-native"
-    assert manifest["version"] == "0.3.0"
+    assert manifest["version"] == "0.4.0"
     assert manifest["manifest_version"] == 2
     assert manifest["api_version"] == 1
     assert manifest["kind"] == "standalone"
@@ -172,7 +176,16 @@ def test_manifest_names_standalone_plugin_and_declares_public_settings():
             "default": ["cli", "tui", "gateway"],
             "description": "Native Hermes surfaces on which coordination turns may be admitted.",
         },
+        "delivery": {
+            "type": "str",
+            "default": "auto",
+            "description": (
+                "auto, native, or inject. auto uses the host's native-turn-source registrar "
+                "when present, otherwise the public inject_message API."
+            ),
+        },
     }
+    assert manifest["requires_hermes"] == ">=0.23.3"
 
 
 def test_native_check_fails_when_registration_handle_is_no_longer_live(
@@ -221,7 +234,7 @@ def test_register_reads_only_plugin_settings_for_board_and_surfaces(
     assert surfaces == ("cli", "gateway")
     assert source.surfaces == ("cli", "gateway")
     assert source.board_script == (tmp_path / "board.py").resolve()
-    assert [key for key, _ in ctx.lookups] == ["supported_surfaces", "board_script"]
+    assert [key for key, _ in ctx.lookups] == ["delivery", "supported_surfaces", "board_script"]
 
 
 def test_register_degrades_gracefully_without_native_registrar(
@@ -241,7 +254,7 @@ def test_register_degrades_gracefully_without_native_registrar(
     with caplog.at_level(logging.WARNING, logger=plugin.__name__):
         assert plugin.register(OldHostContext()) is None
 
-    assert caplog.messages == [plugin._HOST_API_UNAVAILABLE]
+    assert caplog.messages == [plugin._NO_DELIVERY]
 
 
 def test_register_degrades_gracefully_without_native_host_module(
@@ -254,7 +267,7 @@ def test_register_degrades_gracefully_without_native_host_module(
     with caplog.at_level(logging.WARNING, logger=plugin.__name__):
         assert plugin.register(ctx) is None
 
-    assert caplog.messages == [plugin._HOST_API_UNAVAILABLE]
+    assert caplog.messages == [plugin._NO_DELIVERY]
     assert ctx.native_calls == []
     assert ctx.cli_calls == []
 
